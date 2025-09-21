@@ -1,0 +1,384 @@
+import os
+
+repo_name = "ZOT-3B-Simulations-Python"
+os.makedirs(repo_name, exist_ok=True)
+
+# README.md
+readme_content = """ZOT-3B-Simulations-Python
+This repository provides a canonical, community-ready Python implementation
+of the ZOT-regularized three-body problem (ZOT-3B). It contains:
+zot_core.py       : core physics model (ZOT-3B equations)
+benchmark.py      : single-run script with diagnostics and plotting helpers
+lyapunov.py       : utilities to estimate maximal Lyapunov exponent
+batch_runner.py   : batch experiments for standardized benchmarks
+requirements.txt  : Python dependencies
+LICENSE           : MIT License
+
+Goals
+Provide a numerically robust formulation of the 3-body problem with ZOT
+regularization and Locksmith temporal modulation.
+Offer reproducible benchmarks that the community and AIs can run,
+compare, and extend.
+Encourage open collaboration: adapt, open PRs, and cite the ZOT concept.
+
+Quickstart
+Create a Python environment (recommended Python 3.10+)
+Install dependencies: pip install -r requirements.txt
+Run a demo: python benchmark.py
+Run batch tests: python batch_runner.py
+
+Notes
+All code is documented and parameterizable.
+Default units are adimensional for stability; convert to SI for physical units.
+"""
+with open(os.path.join(repo_name, 'README.md'), 'w') as f:
+    f.write(readme_content)
+
+# zot_core.py
+zot_core_content = """\"\"\"
+Core implementation of the ZOT-3B model.
+Functions:
+f_L(tau): Locksmith function
+D_of_tau(tau): time modulation
+zot_rhs(tau, y, masses, params): returns dy/dt for ODE solver
+compute_energy(...): diagnostics for energy, compression potential and more
+
+The model follows the ZOT-3B equations described in the project spec.
+\"\"\"
+import numpy as np
+from scipy.special import lambertw
+G = 1.0  # default: adimensional gravitational constant (adjust per user)
+---------------- Locksmith / D(tau) ----------------
+def f_L(tau, k=0.0, c=1.0, delta=1e-6):
+    \"\"\"Locksmith temporal function f_L(tau).
+    By default parameters are set for adimensional experiments.
+    Arguments:
+      tau: float, time
+      k, c, delta: parameters
+    Returns:
+      float
+    \"\"\"
+    if tau <= 0.0:
+        return 0.0
+    # safe arg for lambertw
+    arg = tau * np.exp(np.clip(k * tau, -700, 700))
+    W = lambertw(arg).real if arg > 0 else 0.0
+    sigmoid = 1.0 / (1.0 + np.exp(-c * (tau - delta)))
+    return float(tau * W * sigmoid)
+
+def D_of_tau(tau, alpha=1.0, **kwargs):
+    return alpha * f_L(tau, **kwargs)
+
+---------------- Regularized pairwise interaction -------------
+def pair_force(r_i, r_j, eps):
+    \"\"\"Return vector direction factor for pairwise force (excluding mass and G).
+    This returns -dr/(r^3 + regularization) style but written safely.
+    \"\"\"
+    dr = r_i - r_j
+    r2 = np.dot(dr, dr) + eps * eps
+    r = np.sqrt(r2)
+    # vector proportional to -(r_vec)/r^3
+    return -dr / (r2 * r)
+
+---------------- Compression potential and gradient -------------
+def Vc_and_grad(positions, mu=1e-3, eps=1e-4):
+    \"\"\"Compute scalar compression potential Vc and its gradient.
+    positions: (n,3) array
+    returns: Vc (float), grad (n,3) array
+    \"\"\"
+    n = positions.shape[0]
+    V = 0.0
+    grad = np.zeros_like(positions)
+    for i in range(n):
+        for j in range(i + 1, n):
+            dr = positions[i] - positions[j]
+            r2 = np.dot(dr, dr) + eps * eps
+            r = np.sqrt(r2)
+            V += mu / r
+            g = -mu * dr / (r2 * r)
+            grad[i] += g
+            grad[j] -= g
+    return float(V), grad
+
+---------------- RHS for ODE integrator ----------------
+def zot_rhs(tau, y, masses, params):
+    \"\"\"Compute derivative for ZOT-3B model.
+    y: vector [x1,y1,z1, ..., vx1,vy1,vz1, ...]
+    masses: array (n,)
+    params: dict with parameters
+    returns: dydt array
+    \"\"\"
+    n = len(masses)
+    pos = y[:3 * n].reshape((n, 3))
+    vel = y[3 * n:].reshape((n, 3))
+    acc = np.zeros_like(pos)
+    eps0 = params.get("eps0", 1e-4)
+    beta = params.get("beta", 1e-2)
+    eps = eps0 * (1.0 + beta * D_of_tau(tau, alpha=params.get("alpha", 1.0),
+                                         k=params.get("k", 0.0),
+                                         c=params.get("c", 1.0),
+                                         delta=params.get("delta", 1e-6)))
+    kappa = params.get("kappa", 1e-3)
+    mu = params.get("mu", 1e-3)
+    xi0 = params.get("xi0", 1e-4)
+
+    D = D_of_tau(tau, alpha=params.get("alpha", 1.0),
+                 k=params.get("k", 0.0), c=params.get("c", 1.0),
+                 delta=params.get("delta", 1e-6))
+    xi = xi0 * D
+
+    # gravitational accelerations
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            acc[i] += G * masses[j] * pair_force(pos[i], pos[j], eps)
+
+    # compression potential gradient
+    Vc, gradVc = Vc_and_grad(pos, mu=mu, eps=eps)
+    acc += - (kappa * D) * gradVc
+
+    # velocity damping
+    acc += - (xi / masses[:, None]) * vel
+
+    dydt = np.zeros_like(y)
+    dydt[:3 * n] = vel.flatten()
+    dydt[3 * n:] = acc.flatten()
+    return dydt
+
+---------------- energy and diagnostics ----------------
+def compute_energy(pos, vel, masses, params, tau):
+    n = len(masses)
+    eps0 = params.get('eps0', 1e-4)
+    beta = params.get('beta', 1e-2)
+    eps = eps0 * (1.0 + beta * D_of_tau(tau, alpha=params.get('alpha', 1.0)))
+    K = 0.5 * np.sum(masses[:, None] * vel ** 2)
+    U = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            rij = np.linalg.norm(pos[i] - pos[j])
+            U += - G * masses[i] * masses[j] / np.sqrt(rij * rij + eps * eps)
+    Vc, _ = Vc_and_grad(pos, mu=params.get('mu', 1e-3), eps=eps)
+    Eeff = K + U + params.get('kappa', 1e-3) * D_of_tau(tau, alpha=params.get('alpha', 1.0)) * Vc
+    return {'K': float(K), 'U': float(U), 'Vc': float(Vc), 'Eeff': float(Eeff)}
+"""
+with open(os.path.join(repo_name, 'zot_core.py'), 'w') as f:
+    f.write(zot_core_content)
+
+# benchmark.py
+benchmark_content = """\"\"\"
+Simple runnable benchmark script. Produces a single run and prints diagnostics.
+\"\"\"
+import json
+import time
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+# Import core functions from the same file when copied into a package.
+# Here in this single-file layout we reference functions above.
+
+def run_demo():
+    # masses and ICs (adimensional benchmark)
+    masses = np.array([1.0, 1.0, 1.0])
+    r0 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.3, 0.8, 0.0]])
+    v0 = np.array([[0.0, 0.0, 0.0], [0.0, 0.5, 0.0], [-0.4, -0.1, 0.0]])
+    y0 = np.concatenate([r0.flatten(), v0.flatten()])
+    params = {
+        'eps0': 1e-4,
+        'beta': 1e-2,
+        'kappa': 1e-3,
+        'mu': 1e-3,
+        'xi0': 1e-4,
+        'alpha': 1.0,
+        'k': 0.0,
+        'c': 1.0,
+        'delta': 1e-6
+    }
+    t_span = (0.0, 200.0)
+
+    t0 = time.time()
+    sol = solve_ivp(lambda t, y: zot_rhs(t, y, masses, params), t_span, y0,
+                    rtol=1e-9, atol=1e-12, max_step=0.2)
+    dt = time.time() - t0
+    print(f"Integration finished: {len(sol.t)} points, elapsed {dt:.2f}s")
+
+    # postprocess: compute energies
+    n_out = sol.y.shape[1]
+    energies = []
+    for i in range(n_out):
+        pos = sol.y[:9, i].reshape((3, 3))
+        vel = sol.y[9:, i].reshape((3, 3))
+        energies.append(compute_energy(pos, vel, masses, params, sol.t[i]))
+
+    print("Initial Eeff:", energies[0]['Eeff'], "Final Eeff:", energies[-1]['Eeff'])
+
+    # simple plot of trajectories
+    pos_sol = sol.y[:9, :].reshape((3, 3, -1))
+    plt.figure(figsize=(6, 6))
+    for i in range(3):
+        plt.plot(pos_sol[i, 0, :], pos_sol[i, 1, :], label=f'body{i+1}')
+        plt.plot(pos_sol[i, 0, 0], pos_sol[i, 1, 0], 'o')
+    plt.legend()
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.title('ZOT-3B trajectories (benchmark)')
+    plt.axis('equal')
+    plt.grid(True)
+    plt.show()
+
+if __name__ == '__main__':
+    run_demo()
+"""
+with open(os.path.join(repo_name, 'benchmark.py'), 'w') as f:
+    f.write(benchmark_content)
+
+# lyapunov.py
+lyapunov_content = """\"\"\"
+Utilities to estimate the maximal Lyapunov exponent using the standard
+variational / two-trajectory method (Benettin-style).
+\"\"\"
+import numpy as np
+from scipy.integrate import solve_ivp
+
+def lyapunov_max_estimate(masses, y0, params, t_span, dt_output=0.5, delta0=1e-8):
+    \"\"\"Estimate maximal Lyapunov exponent.
+    This function integrates a reference trajectory and a perturbed
+    copy, periodically re-normalizing the separation vector.
+    Returns (t_array, lambda_est_array)
+    \"\"\"
+    n = len(masses)
+    # make perturbed initial condition
+    yref = y0.copy()
+    ypert = y0.copy()
+    # small perturbation in position of body 1
+    ypert[0] += delta0
+
+    t0, tf = t_span
+    tau_renorm = dt_output  # renormalization interval
+
+    t = t0
+    log_growth_sum = 0.0
+    t_array = []
+    lambda_est_array = []
+
+    while t < tf:
+        t_next = min(t + tau_renorm, tf)
+        Delta_t = t_next - t
+        if Delta_t <= 0:
+            break
+
+        ref_sol = solve_ivp(lambda tt, yy: zot_rhs(tt, yy, masses, params), (t, t_next), yref,
+                            rtol=1e-9, atol=1e-12)
+        pert_sol = solve_ivp(lambda tt, yy: zot_rhs(tt, yy, masses, params), (t, t_next), ypert,
+                             rtol=1e-9, atol=1e-12)
+
+        yref_next = ref_sol.y[:, -1]
+        ypert_next = pert_sol.y[:, -1]
+        dy = ypert_next - yref_next
+        d = np.linalg.norm(dy)
+
+        if d > 0:
+            log_growth = np.log(d / delta0)
+            log_growth_sum += log_growth
+            current_lambda = log_growth_sum / (t_next - t0)
+            t_array.append(t_next)
+            lambda_est_array.append(current_lambda)
+
+        # renormalize
+        if d > 0:
+            ypert = yref_next + (dy / d) * delta0
+        else:
+            ypert = yref_next
+
+        yref = yref_next
+        t = t_next
+
+    return np.array(t_array), np.array(lambda_est_array)
+"""
+with open(os.path.join(repo_name, 'lyapunov.py'), 'w') as f:
+    f.write(lyapunov_content)
+
+# batch_runner.py
+batch_runner_content = """\"\"\"
+Run batch experiments for the standard benchmark regimes:
+Hamiltonian control
+weak ZOT
+moderate ZOT
+strong ZOT
+
+Saves results to results/ as JSON + npy.
+\"\"\"
+import os
+import json
+import numpy as np
+from scipy.integrate import solve_ivp
+
+RESULTS_DIR = 'results'
+if not os.path.exists(RESULTS_DIR):
+    os.makedirs(RESULTS_DIR)
+
+def run_single(masses, y0, params, t_span):
+    sol = solve_ivp(lambda t, y: zot_rhs(t, y, masses, params), t_span, y0,
+                    rtol=1e-9, atol=1e-12, max_step=params.get('max_step', 0.2))
+    # basic diagnostics
+    start_energy = compute_energy(sol.y[:9, 0].reshape((3,3)), sol.y[9:,0].reshape((3,3)), masses, params, sol.t[0])
+    end_energy = compute_energy(sol.y[:9, -1].reshape((3,3)), sol.y[9:,-1].reshape((3,3)), masses, params, sol.t[-1])
+    return {'t': sol.t.tolist(), 'y': sol.y.tolist(), 'start_energy': start_energy, 'end_energy': end_energy}
+
+def run_benchmarks():
+    masses = np.array([1.0, 1.0, 1.0])
+    r0 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.3, 0.8, 0.0]])
+    v0 = np.array([[0.0, 0.0, 0.0], [0.0, 0.5, 0.0], [-0.4, -0.1, 0.0]])
+    y0 = np.concatenate([r0.flatten(), v0.flatten()])
+    t_span = (0.0, 200.0)
+    regimes = {
+        'control': {'kappa': 0.0, 'xi0': 0.0, 'alpha': 0.0},
+        'weak':    {'kappa': 1e-6, 'xi0': 1e-8, 'alpha': 1.0},
+        'moderate':{'kappa': 1e-4, 'xi0': 1e-5, 'alpha': 1.0},
+        'strong':  {'kappa': 1e-2, 'xi0': 1e-3, 'alpha': 1.0}
+    }
+
+    results = {}
+    for name, basep in regimes.items():
+        params = {'eps0':1e-4, 'beta':1e-2, 'mu':1e-3, 'alpha':basep.get('alpha',1.0),
+                  'kappa':basep.get('kappa',1e-3), 'xi0':basep.get('xi0',1e-4), 'k':0.0, 'c':1.0, 'delta':1e-6}
+        print(f"Running regime: {name}")
+        res = run_single(masses, y0, params, t_span)
+        filename = os.path.join(RESULTS_DIR, f'res_{name}.json')
+        with open(filename, 'w') as fh:
+            json.dump({'meta':{'regime':name,'params':params,'t_span':t_span}, 'result':res}, fh)
+        results[name] = {'file': filename, 'params': params}
+    # save summary
+    with open(os.path.join(RESULTS_DIR, 'summary.json'), 'w') as fh:
+        json.dump(results, fh)
+    print('Batch finished. Results saved to', RESULTS_DIR)
+
+if __name__ == '__main__':
+    run_benchmarks()
+"""
+with open(os.path.join(repo_name, 'batch_runner.py'), 'w') as f:
+    f.write(batch_runner_content)
+
+# requirements.txt
+requirements_content = """numpy
+scipy
+matplotlib
+"""
+with open(os.path.join(repo_name, 'requirements.txt'), 'w') as f:
+    f.write(requirements_content)
+
+# LICENSE
+license_content = """MIT License
+Copyright (c) 2025 Ricardo Bartolome SP - Brazil  ZOT Zero Operator Theory  and contributors
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+"""
+with open(os.path.join(repo_name, 'LICENSE'), 'w') as f:
+    f.write(license_content)
+
+print(f"Repository files created in directory: {3B-ZOT-SOLVED}")
