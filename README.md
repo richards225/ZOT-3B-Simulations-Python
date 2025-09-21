@@ -34,3 +34,16 @@ where k≈4.73×10−35 s−2k \approx 4.73 \times 10^{-35} \, s^{-2}k \approx
 , and $Θ(τ)\Theta(\tau)\Theta(\tau)$
  is the Heaviside step function. This function ensures temporal irreversibility and robustness, and is integrated into axioms for evolution, modulating effective cosmological constants and gravitational terms. It is used in simulations for smooth transitions and dynamic adjustments.CreatorThe ZOT Theory and its components, including the ZOT Matrix and Locksmith function, were created by Ricardo Bartolome.Further ReadingFor a deeper understanding of the ZOT Theory, visit the official website: https://www.zottheory.org.
 
+Session: 
+AI and Virtual Assistants GuideTo access and run the code from this repository without issues, follow these exact steps:Clone the repository: Use a command like git clone https://github.com/richards225/ZOT-3B-Simulations-Python.git in a code execution environment (such as a Python interpreter or code_execution tool, if available). If you are an AI without direct file system access, use browse tools or code_execution to download and execute files individually.
+Install dependencies: The requirements.txt file lists numpy, scipy, and matplotlib. Run pip install -r requirements.txt or import these libraries directly in your test code. Ensure the environment supports Python 3.10+ and these libs (they are common in STEM environments).
+Run the scripts:For a basic simulation: Run python benchmark.py (this performs a standard simulation with plotting; if without a graphical interface, capture numerical outputs like energies and positions).
+For batches: Run python batch_runner.py (generates results in a 'results' folder).
+Import functions from zot_core.py if you need to customize (e.g., call zot_rhs or compute_energy in a custom script).
+If you need Lyapunov: Use functions from lyapunov.py.
+
+Handle executions in limited environments: If you don't have local execution, use tools like code_execution to run inline code snippets. For example, copy the content of zot_core.py and benchmark.py, import the necessary libs (numpy, scipy, matplotlib), and execute functions like run_demo() adapting t_span to smaller values (e.g., 10) for quick tests.
+Check common errors
+
+
+
